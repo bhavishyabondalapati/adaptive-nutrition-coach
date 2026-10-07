@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local database
+*.db
+*.sqlite3
+
+# Node / build output
+node_modules/
+frontend/dist/
+frontend/dev-dist/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
