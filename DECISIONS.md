@@ -37,3 +37,43 @@ A running log of choices made while building this project, and why.
   targets wildly; repeated check-ins converge (tested).
 - **Plausibility clamp:** raw estimates outside formula +/-30 % are clamped with a
   warning; that's almost always incomplete food logging.
+
+## Food logging
+
+- **Two parsers, one interface.** `ClaudeFoodParser` uses structured JSON
+  output so the response always matches a schema; `FakeFoodParser` is a small
+  rule-based parser used in tests and whenever no API key is set, so the whole
+  app runs offline. If the Claude call fails, the API falls back to the rule-
+  based parser and says so.
+- **Model:** `claude-opus-5-5` (configurable with `CLAUDE_MODEL`) at `effort:
+  low` — extraction is easy, so low effort keeps it fast/cheap. Server-side
+  refusal fallbacks are enabled (`fallbacks: "default"`).
+- **The LLM only parses; it never invents nutrition numbers.** Nutrition comes
+  from the bundled CSV or USDA. The LLM's only number is a gram estimate for
+  portions like "a bowl of rice".
+- **Lookup order: bundled CSV, then USDA FoodData Central.** The CSV is fast,
+  offline, and has unit weights ("1 egg = 50 g"); USDA covers everything else.
+  USDA search is limited to Foundation + SR Legacy data (generic foods, per 100 g).
+- **Grams resolution order:** explicit weight unit > the food's own unit in
+  the CSV > LLM estimate > CSV unit with a note > 100 g with a note.
+- **Unknown foods are saved with 0 kcal and a note**, not silently dropped, so
+  the user can see what wasn't counted.
+- **Known limitation: EWMA warm-up lag.** The trend starts at the first
+  weigh-in, so in the first ~2-3 weeks its slope under-reads a steady loss/gain
+  (about 15 % of the deficit after 5 weeks of data). That's small compared with
+  formula error, and the confidence blend + weekly limit already make early
+  check-ins cautious.
+
+## Backend / API
+
+- **Single-user app** (one profile row, id = 1). Fine for a personal PWA; adding
+  users would mean a `user_id` column and auth.
+- **Adaptive TDEE only overrides the formula after an "ok" check-in.** Check-ins
+  with too little data are still stored (so you see why) but targets keep using
+  the live formula, which also reacts to profile edits.
+- **Check-ins run at most weekly** (409 if not due, `?force=true` to override).
+  The frontend triggers a check-in automatically when one is due.
+- **One weigh-in per day**; posting again replaces it.
+- **`today` is a dependency** so tests can pin the date.
+- **Production serving:** FastAPI serves the built frontend from
+  `frontend/dist`, so one `uvicorn` command runs the whole app.
