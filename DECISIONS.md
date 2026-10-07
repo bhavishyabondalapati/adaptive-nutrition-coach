@@ -40,14 +40,20 @@ A running log of choices made while building this project, and why.
 
 ## Food logging
 
-- **Two parsers, one interface.** `ClaudeFoodParser` uses structured JSON
-  output so the response always matches a schema; `FakeFoodParser` is a small
-  rule-based parser used in tests and whenever no API key is set, so the whole
-  app runs offline. If the Claude call fails, the API falls back to the rule-
-  based parser and says so.
-- **Model:** `claude-opus-5-5` (configurable with `CLAUDE_MODEL`) at `effort:
-  low` — extraction is easy, so low effort keeps it fast/cheap. Server-side
-  refusal fallbacks are enabled (`fallbacks: "default"`).
+- **Three parsers, one interface.** `GeminiFoodParser` (default) and
+  `ClaudeFoodParser` share the same prompt and JSON schema, so the reply always
+  matches a fixed shape; `FakeFoodParser` is a small rule-based parser used in
+  tests and whenever no API key is set, so the whole app runs offline. If an LLM
+  call fails, the API falls back to the rule-based parser and says so.
+- **Gemini is the default provider** (`LLM_PROVIDER=gemini|claude|fake`). If the
+  chosen provider's key is missing, the app quietly uses the offline parser
+  rather than crashing. An unknown provider name is an error.
+- **Small, cheap models for both:** `gemini-3.5-flash-lite` (latest general
+  Flash-Lite on Google's model list as of Oct 2026) and `claude-haiku-4-5`.
+  Splitting "2 eggs and toast" into items is easy; a big model adds cost and
+  latency for no gain. Both are overridable (`GEMINI_MODEL`, `CLAUDE_MODEL`).
+  Gemini runs at temperature 0 for repeatable output. (Replaces the earlier
+  `claude-opus-5-5` choice.)
 - **The LLM only parses; it never invents nutrition numbers.** Nutrition comes
   from the bundled CSV or USDA. The LLM's only number is a gram estimate for
   portions like "a bowl of rice".

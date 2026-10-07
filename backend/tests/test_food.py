@@ -7,7 +7,14 @@ import httpx
 import pytest
 
 from app.food_logging import resolve_item
-from app.food_parser import ClaudeFoodParser, FakeFoodParser, FoodParseError, ParsedItem
+from app.food_parser import (
+    ClaudeFoodParser,
+    FakeFoodParser,
+    FoodParseError,
+    GeminiFoodParser,
+    ParsedItem,
+    get_parser,
+)
 from app.nutrition import LocalFoodDB, NutritionService, USDAClient, normalize
 
 
@@ -165,11 +172,11 @@ def test_usda_food_uses_llm_grams(local):
 # ---------- Claude parser with a fake client ----------
 
 class FakeClaudeClient:
-    """Mimics client.beta.messages.create and records the request."""
+    """Mimics client.messages.create and records the request."""
 
     def __init__(self, payload=None, stop_reason="end_turn"):
         self.payload, self.stop_reason, self.calls = payload, stop_reason, []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **kwargs):
         self.calls.append(kwargs)
@@ -198,3 +205,99 @@ def test_claude_parser_maps_structured_output():
 def test_claude_parser_refusal_raises():
     with pytest.raises(FoodParseError):
         ClaudeFoodParser(client=FakeClaudeClient({"items": []}, "refusal")).parse("x")
+
+
+def test_claude_parser_bad_json_raises():
+    client = FakeClaudeClient()
+    client.payload = None  # json.dumps(None) -> "null", which has no "items"
+    with pytest.raises(FoodParseError):
+        ClaudeFoodParser(client=client).parse("x")
+
+
+# ---------- Gemini parser with a fake client ----------
+
+class FakeGeminiClient:
+    """Mimics client.models.generate_content and records the request."""
+
+    def __init__(self, reply_text=None, error=None):
+        self.reply_text, self.error, self.calls = reply_text, error, []
+        self.models = SimpleNamespace(generate_content=self._generate)
+
+    def _generate(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return SimpleNamespace(text=self.reply_text)
+
+
+def test_gemini_parser_maps_json_reply():
+    reply = json.dumps({"items": [
+        {"name": "Egg", "quantity": 2, "unit": "", "grams_estimate": 100},
+        {"name": "white rice", "quantity": 1, "unit": "Bowl", "grams_estimate": 0},
+    ]})
+    client = FakeGeminiClient(reply)
+    items = GeminiFoodParser(client=client, model="test-gemini").parse("2 eggs and a bowl of rice")
+    assert items == [ParsedItem("egg", 2, None, 100), ParsedItem("white rice", 1, "bowl", None)]
+    call = client.calls[0]
+    assert call["model"] == "test-gemini"
+    assert call["contents"] == "2 eggs and a bowl of rice"
+    assert call["config"].response_mime_type == "application/json"
+    assert call["config"].response_json_schema["required"] == ["items"]
+
+
+def test_gemini_parser_empty_reply_raises():
+    with pytest.raises(FoodParseError):
+        GeminiFoodParser(client=FakeGeminiClient("")).parse("x")
+
+
+def test_gemini_network_error_becomes_parse_error():
+    client = FakeGeminiClient(error=httpx.ConnectError("offline"))
+    with pytest.raises(FoodParseError):
+        GeminiFoodParser(client=client).parse("x")
+
+
+def test_gemini_failure_falls_back_to_offline_parser(service):
+    from app.services import parse_food
+
+    parser = GeminiFoodParser(client=FakeGeminiClient(error=httpx.ConnectError("offline")))
+    result = parse_food("2 eggs", parser, service)
+    assert result["parser"] == "rule-based"
+    assert result["items"][0]["matched_name"] == "egg"
+    assert "offline parser" in result["warnings"][0]
+
+
+# ---------- provider selection ----------
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for var in ("LLM_PROVIDER", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    return monkeypatch
+
+
+def test_default_provider_is_gemini(clean_env):
+    clean_env.setenv("GEMINI_API_KEY", "test-key")
+    parser = get_parser()
+    assert parser.name == "gemini"
+    assert parser.model == "gemini-3.5-flash-lite"
+
+
+def test_claude_selectable_via_env(clean_env):
+    clean_env.setenv("LLM_PROVIDER", "claude")
+    clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
+    parser = get_parser()
+    assert parser.name == "claude"
+    assert parser.model == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("provider", [None, "gemini", "claude"])
+def test_missing_key_falls_back_to_offline(clean_env, provider):
+    if provider:
+        clean_env.setenv("LLM_PROVIDER", provider)
+    assert get_parser().name == "rule-based"
+
+
+def test_unknown_provider_rejected(clean_env):
+    clean_env.setenv("LLM_PROVIDER", "gpt")
+    with pytest.raises(ValueError):
+        get_parser()

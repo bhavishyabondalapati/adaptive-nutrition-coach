@@ -1,9 +1,13 @@
 """Turn free text like "2 eggs and toast" into structured food items.
 
-Two parsers share one interface:
-- ClaudeFoodParser: asks Claude to extract items (handles messy language).
+Three parsers share one interface (a `parse(text)` method):
+- GeminiFoodParser (default): asks Google Gemini to extract items.
+- ClaudeFoodParser: same job using Anthropic's Claude.
 - FakeFoodParser: a small rule-based parser. Used in tests and whenever no
   API key is configured, so the app works fully offline.
+
+Both LLM parsers use a small, cheap model and a JSON schema, so the reply is
+always machine-readable. Choose one with LLM_PROVIDER in .env.
 """
 
 from __future__ import annotations
@@ -15,7 +19,11 @@ from dataclasses import asdict, dataclass
 from fractions import Fraction
 from typing import Protocol
 
-DEFAULT_MODEL = "claude-opus-5-5"
+import httpx
+
+# Small, cheap models: this is a simple extraction task.
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5"
 
 
 @dataclass
@@ -132,7 +140,7 @@ class FakeFoodParser:
 
 
 # ---------------------------------------------------------------------------
-# Claude parser
+# LLM parsers (shared prompt + schema)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """You turn a person's description of what they ate into a list of foods.
@@ -173,6 +181,60 @@ OUTPUT_SCHEMA = {
 }
 
 
+def items_from_json(raw: str | None) -> list[ParsedItem]:
+    """Convert the model's JSON reply into ParsedItems (same for every provider)."""
+    if not raw:
+        raise FoodParseError("No text in model response")
+    try:
+        data = json.loads(raw)
+        return [
+            ParsedItem(
+                name=i["name"].strip().lower(),
+                quantity=float(i["quantity"]) or 1.0,
+                unit=(i["unit"].strip().lower() or None),
+                grams_estimate=float(i["grams_estimate"]) if i["grams_estimate"] > 0 else None,
+            )
+            for i in data["items"]
+            if i["name"].strip()
+        ]
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
+        raise FoodParseError("Model returned invalid JSON") from e
+
+
+class GeminiFoodParser:
+    """Food parser backed by Google Gemini with a JSON response schema."""
+
+    name = "gemini"
+
+    def __init__(self, client=None, model: str | None = None):
+        if client is None:
+            from google import genai
+
+            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.client = client
+        self.model = model or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+
+    def parse(self, text: str) -> list[ParsedItem]:
+        from google.genai import errors, types
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_json_schema=OUTPUT_SCHEMA,
+                    temperature=0,
+                ),
+            )
+        except errors.APIError as e:
+            raise FoodParseError(f"Gemini API error ({e.code})") from e
+        except httpx.HTTPError as e:  # the SDK uses httpx for network calls
+            raise FoodParseError("Could not reach the Gemini API") from e
+        return items_from_json(response.text)
+
+
 class ClaudeFoodParser:
     """Food parser backed by the Claude API with structured JSON output."""
 
@@ -184,25 +246,18 @@ class ClaudeFoodParser:
 
             client = anthropic.Anthropic()
         self.client = client
-        self.model = model or os.getenv("CLAUDE_MODEL", DEFAULT_MODEL)
+        self.model = model or os.getenv("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
 
     def parse(self, text: str) -> list[ParsedItem]:
         import anthropic
 
         try:
-            response = self.client.beta.messages.create(
+            response = self.client.messages.create(
                 model=self.model,
-                max_tokens=16000,
+                max_tokens=2048,  # a list of a few foods is short
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": text}],
-                # Simple extraction: low effort keeps it fast and cheap.
-                output_config={
-                    "effort": "low",
-                    "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-                },
-                # If a safety classifier declines, retry on a fallback model in the same call.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
             )
         except anthropic.APIConnectionError as e:
             raise FoodParseError("Could not reach the Claude API") from e
@@ -213,34 +268,23 @@ class ClaudeFoodParser:
             raise FoodParseError("The model declined to parse this text")
         if response.stop_reason == "max_tokens":
             raise FoodParseError("The model's answer was cut off")
-        text_block = next((b.text for b in response.content if b.type == "text"), None)
-        if text_block is None:
-            raise FoodParseError("No text in model response")
-        try:
-            data = json.loads(text_block)
-        except json.JSONDecodeError as e:
-            raise FoodParseError("Model returned invalid JSON") from e
+        return items_from_json(next((b.text for b in response.content if b.type == "text"), None))
 
-        return [
-            ParsedItem(
-                name=i["name"].strip().lower(),
-                quantity=float(i["quantity"]) or 1.0,
-                unit=(i["unit"].strip().lower() or None),
-                grams_estimate=float(i["grams_estimate"]) if i["grams_estimate"] > 0 else None,
-            )
-            for i in data["items"]
-            if i["name"].strip()
-        ]
+
+PROVIDERS = {"gemini": GeminiFoodParser, "claude": ClaudeFoodParser, "fake": FakeFoodParser}
+API_KEY_ENV = {"gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY"}
 
 
 def get_parser() -> FoodParser:
-    """Pick the parser from env: LLM_PROVIDER=claude|fake.
+    """Pick the parser from LLM_PROVIDER (gemini | claude | fake). Default: gemini.
 
-    Default: Claude when ANTHROPIC_API_KEY is set, otherwise the offline parser.
+    If the chosen provider has no API key, use the offline parser instead so
+    the app still works.
     """
-    provider = os.getenv("LLM_PROVIDER")
-    if provider is None:
-        provider = "claude" if os.getenv("ANTHROPIC_API_KEY") else "fake"
-    if provider == "claude":
-        return ClaudeFoodParser()
-    return FakeFoodParser()
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    if provider not in PROVIDERS:
+        raise ValueError(f"LLM_PROVIDER must be one of {list(PROVIDERS)}, got {provider!r}")
+    key_var = API_KEY_ENV.get(provider)
+    if key_var and not os.getenv(key_var):
+        provider = "fake"
+    return PROVIDERS[provider]()
