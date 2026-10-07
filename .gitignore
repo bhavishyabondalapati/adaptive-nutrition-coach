@@ -21,3 +21,6 @@ frontend/dev-dist/
 .DS_Store
 .vscode/
 .idea/
+
+# Local tool config
+.claude/

@@ -73,7 +73,7 @@ export default function WeightView({ onChange }) {
             </div>
             <div className="chart" role="img" aria-label="Weight trend chart for the last 90 days">
               <ResponsiveContainer>
-                <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
+                <ComposedChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
                   <CartesianGrid stroke="var(--grid)" vertical={false} />
                   <XAxis dataKey="t" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(t) => shortDate(new Date(t).toISOString().slice(0, 10))} tick={{ fill: 'var(--text-3)', fontSize: 11 }} stroke="var(--grid)" tickLine={false} minTickGap={24} />
                   <YAxis domain={['dataMin - 1', 'dataMax + 1']} tick={{ fill: 'var(--text-3)', fontSize: 11 }} tickFormatter={(v) => v.toFixed(0)} axisLine={false} tickLine={false} width={44} />

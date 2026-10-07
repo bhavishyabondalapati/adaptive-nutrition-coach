@@ -66,7 +66,7 @@ export default function Trends({ targets, onCheckin }) {
         </div>
         <div className="chart" role="img" aria-label="Daily calorie intake bar chart with target line">
           <ResponsiveContainer>
-            <BarChart data={intake} margin={{ top: 8, right: 8, bottom: 0, left: -12 }} barCategoryGap={2}>
+            <BarChart data={intake} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={2}>
               <CartesianGrid stroke="var(--grid)" vertical={false} />
               <XAxis dataKey="day" tickFormatter={shortDate} tick={{ fill: 'var(--text-3)', fontSize: 11 }} stroke="var(--grid)" tickLine={false} minTickGap={24} />
               <YAxis tick={{ fill: 'var(--text-3)', fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
@@ -98,7 +98,7 @@ export default function Trends({ targets, onCheckin }) {
                   <tr key={c.id}>
                     <td>{shortDate(c.day)}</td>
                     <td>{c.formula_tdee}</td>
-                    <td>{c.raw_estimate ?? '—'}{c.status === 'ok' && <span className="muted"> ({Math.round(c.confidence * 100)}%)</span>}</td>
+                    <td>{c.raw_estimate ?? "—"}{c.status === "ok" && c.confidence < 1 && <span className="muted"> ({Math.round(c.confidence * 100)}%)</span>}</td>
                     <td><b>{c.used_tdee}</b></td>
                     <td>{c.calories}</td>
                     <td>{c.trend_kg_per_week != null ? `${c.trend_kg_per_week > 0 ? '+' : ''}${c.trend_kg_per_week.toFixed(2)}` : '—'}</td>
