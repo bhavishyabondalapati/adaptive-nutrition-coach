@@ -115,8 +115,8 @@ def checkin_to_dict(c: CheckIn | None) -> dict | None:
         "confidence": round(c.confidence, 2),
         "used_tdee": round(c.used_tdee),
         "calories": c.calories,
-        "trend_kg": c.trend_kg,
-        "trend_kg_per_week": c.trend_kg_per_week,
+        "trend_kg": round(c.trend_kg, 2) if c.trend_kg is not None else None,
+        "trend_kg_per_week": round(c.trend_kg_per_week, 3) if c.trend_kg_per_week is not None else None,
         "warnings": json.loads(c.warnings),
     }
 
