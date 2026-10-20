@@ -1,167 +1,67 @@
 # Adaptive Nutrition Coach
 
-An installable web app (PWA) that sets your calorie and macro targets for cutting, maintaining, or bulking, then **learns your real metabolism** from what you eat and how your weight trend moves, and adjusts your targets every week. You log food in plain English ("2 eggs and toast"), an LLM turns it into structured items, and nutrition comes from a bundled food table or USDA FoodData Central. It also builds a weekly workout plan from your goal, schedule, and equipment.
+A self-hosted progressive web app that sets calorie and macro targets for cutting, maintaining, or bulking, then re-estimates the user's actual energy expenditure each week from logged intake and the weight trend.
 
----
+Food is logged in plain English ("2 eggs and toast"); an LLM converts the text into structured items, and nutrition values come from a bundled food table or USDA FoodData Central. The app also generates a weekly workout plan from the user's goal, schedule, and available equipment.
 
-## 1. What it does
+## Features
 
-- **Starting targets** from the Mifflin-St Jeor BMR equation and an activity multiplier, with safety limits (max loss rate, calorie floor, warnings).
-- **Adaptive TDEE**: smooths your daily weigh-ins into a trend, compares that trend with your logged calories, and estimates what you *actually* burn. Targets update weekly.
-- **Natural-language food logging** via Google Gemini (default) or Claude, or an offline rule-based parser, with nutrition from a bundled CSV or USDA.
-- **Weekly workout plan** that adapts to 2–6 days/week and full gym / dumbbells / bodyweight.
-- **Charts** for weight (raw + trend) and daily intake vs target. Works offline as an installed app shell; light and dark themes.
+- **Starting targets** from the Mifflin-St Jeor BMR equation and an activity multiplier, with safety limits on loss/gain rate and a calorie floor.
+- **Adaptive TDEE**: smooths daily weigh-ins into a trend, compares it with logged intake, and updates targets at a weekly check-in.
+- **Natural-language food logging** via Google Gemini (default), Claude, or an offline rule-based parser. Nutrition comes from a bundled CSV or USDA FoodData Central.
+- **Weekly workout plan** for 2–6 training days per week and full gym, dumbbell, or bodyweight equipment.
+- **Charts** for raw and trend weight and for daily intake against target.
+- **Installable PWA** with an offline app shell and light and dark themes.
 
-## 2. Tools and libraries (and why)
+## Architecture
 
-| Tool | Why |
+```mermaid
+flowchart TD
+    UI["React PWA<br/>Today · Weight · Trends · Workouts · Profile"] -- "JSON /api/*" --> API
+
+    subgraph Server["FastAPI (single process)"]
+        API["main.py — routes, validation"] --> SVC["services.py"]
+        API --> WORK["workouts.py — weekly plan"]
+        SVC --> CALC["calculations.py — BMR, TDEE, targets"]
+        SVC --> ADAPT["adaptive.py — EWMA trend, adaptive TDEE"]
+        SVC --> PARSE["food_parser.py — Gemini / Claude / rule-based"]
+        SVC --> LOG["food_logging.py — grams to calories"]
+        LOG --> NUT["nutrition.py — CSV, then USDA"]
+        SVC <--> DB[("SQLite")]
+    end
+
+    PARSE -. optional .-> LLM["Gemini / Claude API"]
+    NUT -. optional .-> USDA["USDA FoodData Central"]
+```
+
+External services are optional. Without API keys the app uses the rule-based parser and the bundled food table (47 foods). In production, FastAPI also serves the built frontend, so a single `uvicorn` process runs the whole app.
+
+The calculation modules (`calculations.py`, `adaptive.py`, `workouts.py`) are pure functions with no database or web dependencies. The parser, nutrition source, database session, and current date are FastAPI dependencies, so tests replace them with offline fakes.
+
+### Tech stack
+
+| Component | Role |
 |---|---|
-| **FastAPI** | Modern Python web framework; request validation with Pydantic and automatic docs at `/docs`. |
-| **SQLAlchemy + SQLite** | SQLite is a single file with zero setup — perfect for a personal app. SQLAlchemy keeps the code database-agnostic. |
-| **Pydantic** | Validates request bodies (e.g. age 16–100) so bad data never reaches the math. |
-| **Google Gen AI SDK (Gemini)** | Default food parser. `gemini-3.5-flash-lite` is small and cheap, and a JSON response schema guarantees machine-readable output. |
-| **Anthropic Python SDK (Claude)** | Optional alternative parser (`claude-haiku-4-5`) with *structured outputs*; switch with `LLM_PROVIDER=claude`. |
-| **httpx** | HTTP client for the USDA API; its `MockTransport` lets tests fake USDA offline. |
-| **python-dotenv** | Loads API keys from `.env` so they never live in code. |
-| **pytest** | Test runner. 123 tests cover the math, parsing, planner, and API. |
-| **React + Vite** | Fast dev server and build; React components keep each screen small. |
-| **Recharts** | Declarative chart components for React. |
-| **vite-plugin-pwa** | Generates the web app manifest and service worker that make the app installable. |
+| FastAPI, Pydantic | HTTP API and request validation; OpenAPI docs at `/docs` |
+| SQLAlchemy, SQLite | Single-file persistence with no external database |
+| Google Gen AI SDK (`gemini-3.5-flash-lite`) | Default food parser, constrained by a JSON response schema |
+| Anthropic SDK (`claude-haiku-4-5`) | Alternative parser using structured outputs (`LLM_PROVIDER=claude`) |
+| httpx | USDA client; `MockTransport` enables offline tests |
+| React, Vite, Recharts | Frontend, build tooling, and charts |
+| vite-plugin-pwa | Web app manifest and service worker |
+| pytest | 123 tests covering the math, parsing, planner, and API |
 
-## 3. File structure
+## Method
 
-```
-adaptive-nutrition-coach/
-├── README.md                  This file
-├── DECISIONS.md               Log of design choices and why they were made
-├── requirements.txt           Python dependencies (pinned)
-├── .env.example               Template for API keys (placeholders only)
-├── .gitignore                 Keeps secrets, databases, and build output out of git
-├── backend/
-│   ├── pytest.ini             Tells pytest where the tests are
-│   ├── data/foods.csv         Bundled nutrition table (47 common foods, per 100 g + unit weights)
-│   ├── app/
-│   │   ├── calculations.py    BMR, TDEE, calorie targets with safety caps, macro split
-│   │   ├── adaptive.py        EWMA weight trend + adaptive TDEE estimate
-│   │   ├── workouts.py        Rule-based weekly workout planner
-│   │   ├── food_parser.py     Gemini (default) + Claude parsers + offline rule-based parser (same interface)
-│   │   ├── nutrition.py       Food lookup: bundled CSV first, then USDA FoodData Central
-│   │   ├── food_logging.py    Works out grams eaten and computes calories/macros
-│   │   ├── db.py              SQLite tables: profile, weights, food entries, check-ins
-│   │   ├── services.py        Glue between the database and the math (targets, check-ins, logging)
-│   │   └── main.py            FastAPI routes under /api; serves the built frontend at /
-│   └── tests/
-│       ├── conftest.py        In-memory database + offline parser fixtures for API tests
-│       ├── test_calculations.py  BMR / TDEE / targets / safety limits / macros
-│       ├── test_adaptive.py   EWMA, slope, adaptive TDEE convergence and edge cases
-│       ├── test_food.py       Parsers, CSV + mocked USDA lookups, gram resolution, fake Gemini/Claude clients, provider selection
-│       ├── test_workouts.py   Planner splits, equipment, determinism
-│       └── test_api.py        End-to-end API flows including a 5-week check-in simulation
-├── frontend/
-│   ├── index.html             HTML shell with PWA meta tags
-│   ├── vite.config.js         Vite + PWA plugin config; proxies /api to FastAPI in dev
-│   ├── package.json           JavaScript dependencies and scripts
-│   ├── public/                Favicon and PWA icons (192, 512, maskable, Apple touch)
-│   └── src/
-│       ├── main.jsx           React entry point
-│       ├── App.jsx            Tab navigation, onboarding, automatic weekly check-in
-│       ├── api.js             Small fetch wrapper for every backend endpoint
-│       ├── index.css          Design tokens (light/dark) and all styles
-│       └── components/
-│           ├── Today.jsx      Targets, macro progress, natural-language food log
-│           ├── WeightView.jsx Weigh-in form, weight + trend chart, history
-│           ├── Trends.jsx     30-day intake chart vs target, check-in history
-│           ├── Plan.jsx       Weekly workout plan
-│           └── ProfileForm.jsx Body stats, goal, training settings
-└── scripts/
-    ├── seed_demo.py           Fills the database with 6 weeks of simulated data
-    └── make_icons.py          Generates the PNG app icons with only the standard library
-```
-
-## 4. Setup
-
-```bash
-# 1. Python environment (Anaconda)
-conda create -n adaptive-nutrition-coach python=3.12 -y
-conda activate adaptive-nutrition-coach
-pip install -r requirements.txt
-
-# 2. Frontend (needs Node 20+)
-cd frontend
-npm install
-npm run build
-cd ..
-
-# 3. (Optional) API keys
-cp .env.example .env    # then edit .env
-```
-
-All API keys are optional. `LLM_PROVIDER` picks the food parser: `gemini` (default, needs `GEMINI_API_KEY`), `claude` (needs `ANTHROPIC_API_KEY`), or `fake`. If the chosen provider has no key, the app uses the offline rule-based parser. Without `USDA_API_KEY` it only uses the bundled food table.
-
-## 5. How to run
-
-**Run the app** (from the project root; FastAPI serves the built frontend):
-
-```bash
-uvicorn app.main:app --app-dir backend --port 8000
-```
-
-Open http://localhost:8000. To install it, use your browser's "Install app" button (Chrome/Edge) or Share → Add to Home Screen (iPhone Safari). Note: on a phone the app needs HTTPS, except on `localhost`.
-
-**Load demo data** (6 weeks of simulated weigh-ins and meals; replaces existing data):
-
-```bash
-python scripts/seed_demo.py
-```
-
-**Development mode** (hot reload; run each in its own terminal):
-
-```bash
-uvicorn app.main:app --app-dir backend --reload --port 8000
-```
-
-```bash
-cd frontend && npm run dev
-```
-
-Then open http://localhost:5173. API docs are at http://localhost:8000/docs.
-
-**Run the tests** (fully offline — no API keys or network needed):
-
-```bash
-pytest backend
-```
-
-## 6. How it was built
-
-1. **Math first, as pure functions** (`calculations.py`): BMR, TDEE, targets, safety caps, macros — with hand-calculated tests.
-2. **Adaptive TDEE** (`adaptive.py`): EWMA trend, least-squares slope, energy-balance estimate, confidence blending, weekly change limit — tested with simulated people whose true TDEE is known.
-3. **Workout planner** (`workouts.py`): exercise library × session templates × splits; tested for coverage, equipment, determinism.
-4. **Food pipeline**: bundled CSV + USDA client, an offline rule-based parser, Gemini and Claude parsers sharing one prompt and JSON schema, and gram resolution — all tested offline with mocks.
-5. **Database + API** (`db.py`, `services.py`, `main.py`): SQLite tables, routes, weekly check-ins; API tests use an in-memory database and a pinned "today".
-6. **React PWA**: Vite + React + Recharts, manifest + service worker, generated icons, light/dark themes.
-7. **Verified in a browser** with seeded demo data at phone size in both themes, then fixed the layout issues found (clipped axis labels, wrapping table).
-
-Each step was committed separately; see `git log`.
-
-## The formulas
-
-### BMR — Mifflin-St Jeor
-
-Calories your body burns at complete rest:
+### BMR and TDEE
 
 ```
-BMR = 10 × weight(kg) + 6.25 × height(cm) − 5 × age(years) + s
-s = +5 for men, −161 for women
+BMR  = 10 × weight(kg) + 6.25 × height(cm) − 5 × age(years) + s
+       s = +5 (male), −161 (female)
+TDEE = BMR × activity factor
 ```
 
-Example: 80 kg, 180 cm, 30-year-old man → 800 + 1125 − 150 + 5 = **1780 kcal/day**.
-
-### TDEE — activity multiplier
-
-Total daily energy expenditure = BMR × activity factor:
-
-| Level | Multiplier |
+| Activity level | Multiplier |
 |---|---|
 | Sedentary | 1.2 |
 | Light (1–3 days/week) | 1.375 |
@@ -169,26 +69,27 @@ Total daily energy expenditure = BMR × activity factor:
 | Active (6–7 days/week) | 1.725 |
 | Very active | 1.9 |
 
-Example: 1780 × 1.55 = **2759 kcal/day**.
+Example: 80 kg, 180 cm, 30-year-old male → BMR 1780 kcal/day; at a moderate activity level, TDEE ≈ 2759 kcal/day.
 
 ### Calorie target
 
-Rates are a percentage of body weight per week (defaults: cut 0.5 %, bulk 0.25 %). One kg of body weight ≈ **7700 kcal**:
+Rates are a percentage of body weight per week (defaults: cut 0.5%, bulk 0.25%), using 7700 kcal per kg of body-weight change:
 
 ```
 kg per week     = weight × rate% / 100
 daily change    = kg per week × 7700 / 7
 target calories = TDEE − daily change   (cut)
                 = TDEE + daily change   (bulk)
-                = TDEE                   (maintain)
+                = TDEE                  (maintain)
 ```
 
-Example: cutting at 0.5 % of 80 kg = 0.4 kg/week → 0.4 × 7700 / 7 = 440 kcal/day deficit → 2759 − 440 = **2319 kcal**.
+Example: a 0.5% cut at 80 kg is 0.4 kg/week, a 440 kcal/day deficit, giving a target of 2319 kcal.
 
-**Safety limits** (each one adds a plain-English warning):
-- Loss rate capped at **1 %/week**; gain rate capped at **0.5 %/week**.
-- Calories never below **1500 (men) / 1200 (women)**. If the floor kicks in, the app recalculates the real (slower) rate.
-- If protein + fat minimums don't fit, carbs are set to 0 and you're warned.
+Safety limits, each of which returns a warning:
+
+- Loss rate capped at 1%/week; gain rate capped at 0.5%/week.
+- Calories never below 1500 (male) / 1200 (female). When the floor applies, the achievable rate is recalculated.
+- If protein and fat minimums do not fit within the target, carbohydrates are set to 0.
 
 ### Macros
 
@@ -198,47 +99,149 @@ fat     = max(25% of calories ÷ 9, 0.6 g/kg)
 carbs   = (calories − protein×4 − fat×9) ÷ 4
 ```
 
-### Weight trend — exponentially weighted moving average (EWMA)
+### Weight trend (EWMA)
 
-Scale weight jumps around by 1–2 kg from water and salt. The trend smooths that out:
+Daily weight varies by 1–2 kg from water and sodium. The trend is an exponentially weighted moving average:
 
 ```
 trend_today = trend_yesterday + α × (weight_today − trend_yesterday),   α = 0.1
 ```
 
-Each weigh-in moves the trend 10 % of the way toward it. If you skip days, the next weigh-in counts more: `α_eff = 1 − (1 − α)^days_since_last`.
+When days are skipped, the next weigh-in is weighted as `α_eff = 1 − (1 − α)^days_since_last`.
 
 ### Adaptive TDEE
 
-Energy balance: whatever you eat beyond what you burn ends up stored (and vice versa).
+By energy balance:
 
 ```
-burned = average daily intake − (trend slope in kg/day × 7700)
+TDEE_estimate = mean daily intake − (trend slope in kg/day × 7700)
 ```
 
-The slope is a least-squares line through the trend over the last **28 days**. Example: you average 2000 kcal and the trend drops 0.27 kg/week (−0.039 kg/day) → 2000 + 0.039 × 7700 ≈ **2300 kcal/day** actually burned.
+The slope is a least-squares fit over the trend for the last 28 days. Example: a 2000 kcal average intake with a trend falling 0.039 kg/day gives an estimate of about 2300 kcal/day.
 
 Guard rails:
-- Needs **≥10 food-logged days and ≥7 weigh-ins over ≥14 days**; otherwise keeps the current value.
-- **Confidence** = logged days ÷ 21 (max 1). `TDEE = confidence × estimate + (1 − confidence) × formula`.
-- Estimates outside formula **±30 %** are clamped (usually means incomplete logging).
-- The TDEE used for targets moves at most **±200 kcal per weekly check-in**, so one odd week can't swing your plan.
 
-## 7. Key concepts (interview-ready)
+- Requires at least 10 food-logged days and 7 weigh-ins spanning 14 days; otherwise the current value is kept.
+- Confidence = logged days ÷ 21 (capped at 1). `TDEE = confidence × estimate + (1 − confidence) × formula`.
+- Estimates outside ±30% of the formula value are clamped (typically a sign of incomplete logging).
+- The TDEE used for targets changes by at most ±200 kcal per weekly check-in.
 
-- **Why adaptive TDEE beats formulas**: formulas predict an average person; real people differ by ±10–20 %. Measuring intake and weight change closes the loop — it's a feedback controller.
-- **Signal vs noise**: daily weight is noisy; EWMA is a simple low-pass filter. Trade-off: smoother trend = more lag (the README and `DECISIONS.md` discuss the warm-up lag).
-- **Least-squares slope**: uses every point in the window, so one outlier matters less than using only the first and last values.
-- **Damping**: the ±200 kcal/week limit and confidence blending stop the system from over-reacting — the same idea as a learning rate.
-- **LLM for parsing, database for facts**: the model only extracts *what* you ate; nutrition numbers come from a trusted source. This avoids hallucinated calories. A JSON schema guarantees valid, parseable output.
-- **Provider abstraction**: Gemini, Claude, and the rule-based parser all expose the same `parse(text)` method, so swapping providers is a one-line `.env` change and the rest of the app doesn't care.
-- **Dependency injection for testability**: the parser, nutrition source, database, and even "today" are FastAPI dependencies, so tests swap in fakes and run offline.
-- **Pure functions**: the math has no I/O, which makes it trivial to test exhaustively.
-- **PWA basics**: a manifest (name, icons, display mode) + a service worker (caches the app shell) make a website installable and usable offline.
+## Quickstart
 
-## Limitations
+Requires Python 3.12, Node 20+, and conda.
 
-- Single user, no login. Metric units only.
-- Assumes logged days are complete; unlogged days are skipped rather than counted as zero.
-- Protein is based on total body weight, which overstates needs at high body-fat levels.
-- Not medical advice. Talk to a professional before aggressive diets, especially with health conditions.
+```bash
+conda create -n adaptive-nutrition-coach python=3.12 -y
+conda activate adaptive-nutrition-coach
+pip install -r requirements.txt
+
+cd frontend && npm install && npm run build && cd ..
+
+cp .env.example .env    # optional: add API keys
+```
+
+All API keys are optional. `LLM_PROVIDER` selects the food parser: `gemini` (default, requires `GEMINI_API_KEY`), `claude` (requires `ANTHROPIC_API_KEY`), or `fake`. If the selected provider has no key, the offline rule-based parser is used. Without `USDA_API_KEY`, only the bundled food table is used.
+
+Run the app (FastAPI serves the built frontend):
+
+```bash
+uvicorn app.main:app --app-dir backend --port 8000
+```
+
+Open http://localhost:8000. The app can be installed from the browser ("Install app" in Chrome/Edge, or Share → Add to Home Screen in iOS Safari). Installation on a phone requires HTTPS unless served from `localhost`.
+
+Load six weeks of simulated weigh-ins and meals (replaces existing data):
+
+```bash
+python scripts/seed_demo.py
+```
+
+Development mode with hot reload, in two terminals:
+
+```bash
+uvicorn app.main:app --app-dir backend --reload --port 8000
+```
+
+```bash
+cd frontend && npm run dev
+```
+
+The dev frontend runs at http://localhost:5173 and proxies `/api` to FastAPI.
+
+## Running tests
+
+The test suite runs offline; no API keys or network access are required.
+
+```bash
+pytest backend
+```
+
+| File | Coverage |
+|---|---|
+| `test_calculations.py` | BMR, TDEE, targets, safety limits, macros |
+| `test_adaptive.py` | EWMA, slope, adaptive TDEE convergence and edge cases, using simulated users with a known true TDEE |
+| `test_food.py` | Parsers, CSV and mocked USDA lookups, gram resolution, fake Gemini/Claude clients, provider selection |
+| `test_workouts.py` | Planner splits, equipment variants, determinism |
+| `test_api.py` | End-to-end API flows, including a five-week check-in simulation |
+
+## Project structure
+
+```
+adaptive-nutrition-coach/
+├── DECISIONS.md               Design decision log
+├── requirements.txt           Pinned Python dependencies
+├── .env.example               API key template (placeholders only)
+├── backend/
+│   ├── pytest.ini
+│   ├── data/foods.csv         Bundled nutrition table (per 100 g, with unit weights)
+│   ├── app/
+│   │   ├── calculations.py    BMR, TDEE, calorie targets, safety caps, macro split
+│   │   ├── adaptive.py        EWMA weight trend and adaptive TDEE estimate
+│   │   ├── workouts.py        Rule-based weekly workout planner
+│   │   ├── food_parser.py     Gemini, Claude, and rule-based parsers (shared interface)
+│   │   ├── nutrition.py       Food lookup: bundled CSV, then USDA FoodData Central
+│   │   ├── food_logging.py    Gram resolution and calorie/macro calculation
+│   │   ├── db.py              SQLite tables: profile, weights, food entries, check-ins
+│   │   ├── services.py        Orchestration between the database and calculations
+│   │   └── main.py            FastAPI routes under /api; serves the built frontend
+│   └── tests/
+│       ├── conftest.py        In-memory database and offline parser fixtures
+│       └── test_*.py          See "Running tests"
+├── frontend/
+│   ├── index.html             HTML shell with PWA meta tags
+│   ├── vite.config.js         Vite and PWA plugin config; dev proxy to FastAPI
+│   ├── package.json
+│   ├── public/                Favicon and PWA icons
+│   └── src/
+│       ├── main.jsx           React entry point
+│       ├── App.jsx            Tab navigation, onboarding, automatic weekly check-in
+│       ├── api.js             Fetch wrapper for backend endpoints
+│       ├── index.css          Design tokens (light/dark) and styles
+│       └── components/
+│           ├── Today.jsx      Targets, macro progress, food log
+│           ├── WeightView.jsx Weigh-in form, weight and trend chart, history
+│           ├── Trends.jsx     30-day intake vs target, check-in history
+│           ├── Plan.jsx       Weekly workout plan
+│           └── ProfileForm.jsx Body stats, goal, training settings
+└── scripts/
+    ├── seed_demo.py           Generates six weeks of simulated data
+    └── make_icons.py          Generates PNG app icons (standard library only)
+```
+
+## Design decisions
+
+See [DECISIONS.md](DECISIONS.md) for the full log. Highlights:
+
+- **The LLM extracts foods and quantities only.** Nutrition values always come from the food table or USDA, so the model cannot invent calorie numbers.
+- **One parser interface, three implementations.** Gemini, Claude, and the rule-based parser expose the same `parse(text)` method; switching providers is a single `.env` change, and LLM failures fall back to the rule-based parser.
+- **Smoothing and damping over raw measurements.** EWMA filtering, a least-squares slope, confidence blending, and the ±200 kcal weekly cap trade responsiveness for stability.
+- **Unlogged days are skipped, not counted as zero intake.**
+
+## Limitations and future work
+
+- Single user with no authentication; metric units only.
+- Assumes logged days are complete.
+- Protein targets use total body weight, which overstates requirements at high body-fat levels.
+- The EWMA trend lags real weight change during the first weeks of use.
+- No database migrations and no frontend tests.
+- Not medical advice. Consult a professional before aggressive dieting, particularly with existing health conditions.
