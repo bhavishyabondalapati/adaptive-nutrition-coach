@@ -35,6 +35,7 @@ def client():
         main.get_food_parser: FakeFoodParser,
         main.get_nutrition: lambda: NutritionService(LocalFoodDB()),
         main.get_today: lambda: TODAY,
+        main.llm_rate_limit: main.RateLimiter(main.LLM_REQUESTS_PER_MINUTE),  # fresh counts per test
     }
     with TestClient(main.app) as c:
         yield c

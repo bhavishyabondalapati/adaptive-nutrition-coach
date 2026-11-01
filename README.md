@@ -189,6 +189,7 @@ pytest backend
 ```
 adaptive-nutrition-coach/
 ├── DECISIONS.md               Design decision log
+├── LICENSE                    MIT license
 ├── requirements.txt           Pinned Python dependencies
 ├── .env.example               API key template (placeholders only)
 ├── backend/
@@ -245,3 +246,7 @@ See [DECISIONS.md](DECISIONS.md) for the full log. Highlights:
 - The EWMA trend lags real weight change during the first weeks of use.
 - No database migrations and no frontend tests.
 - Not medical advice. Consult a professional before aggressive dieting, particularly with existing health conditions.
+
+## License
+
+Code is released under the MIT License; see [LICENSE](LICENSE).

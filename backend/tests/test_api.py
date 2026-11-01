@@ -102,3 +102,20 @@ def test_checkin_with_no_data_keeps_formula(client):
     r = client.post("/api/checkins").json()
     assert r["checkin"]["status"] == "insufficient_data"
     assert client.get("/api/targets").json()["tdee_source"] == "formula"
+
+
+def test_food_parsing_is_rate_limited(client):
+    from app import main
+
+    main.app.dependency_overrides[main.llm_rate_limit] = main.RateLimiter(2)
+    for _ in range(2):
+        assert client.post("/api/food/parse", json={"text": "2 eggs"}).status_code == 200
+    r = client.post("/api/food/parse", json={"text": "2 eggs"})
+    assert r.status_code == 429 and r.headers["retry-after"] == "60"
+
+
+def test_security_headers(client):
+    r = client.get("/api/health")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["x-frame-options"] == "DENY"
+    assert "default-src 'self'" in r.headers["content-security-policy"]

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import date
 from functools import lru_cache
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -35,6 +37,51 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Adaptive Nutrition Coach", lifespan=lifespan)
+
+
+# ---------- security headers and rate limiting ----------
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+}
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
+
+
+LLM_REQUESTS_PER_MINUTE = int(os.getenv("LLM_REQUESTS_PER_MINUTE", "20"))
+
+
+class RateLimiter:
+    """Allow `per_minute` requests per client IP in any 60-second window.
+
+    Food parsing calls a paid LLM, so this caps what one client can spend.
+    Counts live in memory, so they reset when the server restarts.
+    """
+
+    def __init__(self, per_minute: int):
+        self.per_minute = per_minute
+        self.hits: dict[str, deque[float]] = defaultdict(deque)
+
+    def __call__(self, request: Request) -> None:
+        now = time.monotonic()
+        hits = self.hits[request.client.host if request.client else "unknown"]
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= self.per_minute:
+            raise HTTPException(429, "Too many food requests. Wait a minute and try again.", headers={"Retry-After": "60"})
+        hits.append(now)
+
+
+llm_rate_limit = RateLimiter(LLM_REQUESTS_PER_MINUTE)
 
 
 # ---------- dependencies (overridden in tests) ----------
@@ -151,6 +198,7 @@ def delete_weight(entry_id: int, db: Session = Depends(get_db)):
 @app.post("/api/food/parse")
 def parse_food(
     body: FoodIn,
+    _: None = Depends(llm_rate_limit),
     parser: FoodParser = Depends(get_food_parser),
     nutrition: NutritionService = Depends(get_nutrition),
 ):
@@ -161,6 +209,7 @@ def parse_food(
 @app.post("/api/food")
 def log_food(
     body: FoodIn,
+    _: None = Depends(llm_rate_limit),
     db: Session = Depends(get_db),
     parser: FoodParser = Depends(get_food_parser),
     nutrition: NutritionService = Depends(get_nutrition),
